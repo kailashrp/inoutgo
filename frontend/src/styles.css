@@ -7,3 +7,49 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
 
 .auth-switch{width:100%;justify-content:center;margin-top:9px}.status-pill{display:inline-flex;padding:5px 8px;border-radius:6px;font-size:9px;font-weight:700}.status-active{background:#132a24;color:#65d9a4}.status-inactive{background:#2a2020;color:#ffadad}.small-action{padding:7px 9px;font-size:9px;white-space:nowrap}
+
+/* Transaction running balances */
+
+.aggregation-note{font-size:10px;line-height:1.55;color:#8d9ab2;background:#121824;border:1px solid #252e40;border-radius:9px;padding:10px 12px;margin:-2px 0 12px;}
+.toolbar-date{display:flex;align-items:center;gap:6px;color:#9aa6bf;font-size:11px;white-space:nowrap}.toolbar-date input{min-width:122px;max-width:140px;background:#11151e;border:1px solid #2b3344;border-radius:8px;color:#dce4f8;padding:9px;font:inherit}.toolbar-actions{flex-wrap:wrap}@media(max-width:760px){.toolbar-date{flex:1 1 130px}.toolbar-date input{min-width:0;width:100%}.toolbar-actions>select{min-width:130px;flex:1 1 130px}}
+
+/* Advanced report wizard */
+.report-modal{width:min(100%,680px)}
+.report-modal>label{display:block;margin-bottom:14px}
+.report-modal select,.report-modal input[type=date]{width:100%;margin-top:7px}
+.report-preview{border:1px solid #2a3040;background:#0d1119;border-radius:10px;padding:13px;margin:8px 0 18px}
+.report-preview-title{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:11px;margin-bottom:12px}
+.report-preview-title span,.report-preview .muted{color:#818ba0;font-size:10px}
+.report-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.report-metrics>div{padding:10px;background:#151b27;border:1px solid #293246;border-radius:8px;min-width:0}
+.report-metrics small{display:block;color:#8b95aa;font-size:9px;margin-bottom:6px}
+.report-metrics b{display:block;font-size:12px;overflow-wrap:anywhere}
+.preview-row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid #252b38;font-size:10px}
+.preview-row span{color:#9ca6bb}.preview-row b{white-space:nowrap}
+.report-preview>p{margin:10px 0}
+@media(max-width:520px){.report-modal{padding:16px}.report-metrics{grid-template-columns:1fr}.report-preview-title{align-items:flex-start;flex-direction:column}.report-modal .modal-actions{flex-direction:column-reverse}.report-modal .modal-actions button{width:100%}}
+
+
+/* Compact quick-download and saved-entry preset controls */
+.quick-download-modal { max-width: 460px; }
+.quick-format-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }
+.quick-format-grid button { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; }
+.preset-row { display: grid; grid-template-columns: 1fr 1.2fr; gap: 10px; margin-top: 12px; align-items: end; }
+.preset-row label { margin: 0; }
+.preset-row select, .preset-save input { width: 100%; min-width: 0; }
+.preset-save { display: flex; gap: 7px; align-items: center; }
+.preset-save input { flex: 1; }
+@media (max-width: 720px) {
+  .quick-format-grid { grid-template-columns: 1fr; }
+  .preset-row { grid-template-columns: 1fr; }
+  .preset-save { width: 100%; }
+  .toolbar { align-items: stretch; }
+  .toolbar-actions { width: 100%; flex-wrap: wrap; }
+}
+
+/* Shared Normal ledger balance */
+.main-balance-card{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:20px 22px;margin:0 0 15px;border:1px solid #33466f;border-radius:13px;background:linear-gradient(115deg,#18243d 0%,#121925 68%,#11141c 100%);box-shadow:0 10px 30px #05091435}
+.main-balance-card h2{font-size:30px;letter-spacing:-1px;margin:8px 0 5px;color:#e9efff}
+.main-balance-card p{font-size:10px;line-height:1.5;color:#9aa8c5;margin:0}
+.main-balance-card .metric-icon{flex:0 0 auto}
+@media(max-width:520px){.main-balance-card{padding:16px;align-items:flex-start}.main-balance-card h2{font-size:24px}.main-balance-card p{max-width:240px}}
