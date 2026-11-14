@@ -87,15 +87,69 @@ app.get('/api/auth/me', auth, (req, res) => res.json({ user: safeUser(req.user) 
 app.get('/api/entries', auth, async (req, res) => {
   const { from, to, kind, category, sort = 'newest', userId } = req.query;
   if (!validDateRange(from, to)) return res.status(400).json({ message: 'Invalid date filter.' });
-  const filter = {};
-  if (req.user.role === 'admin' && userId) filter.user = userId; else filter.user = req.user._id;
-  if (from || to) filter.occurredAt = {}; if (from) filter.occurredAt.$gte = new Date(from); if (to) { const end = new Date(to); end.setHours(23, 59, 59, 999); filter.occurredAt.$lte = end; }
-  if (['income', 'expense'].includes(kind)) filter.kind = kind;
-  if (['normal', 'rental'].includes(category)) filter.category = category;
-  const sortMap = { newest: { occurredAt: -1 }, oldest: { occurredAt: 1 }, 'low-high': { amount: 1 }, 'high-low': { amount: -1 }, person: { user: 1, occurredAt: -1 } };
-  const entries = await Entry.find(filter).populate('user', 'username').sort(sortMap[sort] || sortMap.newest).limit(5000).lean();
-  const normalized = entries.map(e => ({ ...e, id: e._id, username: e.user?.username || 'Unknown', user: e.user?._id }));
-  if (sort === 'person') normalized.sort((a, b) => a.username.localeCompare(b.username) || new Date(b.occurredAt) - new Date(a.occurredAt));
+  if (userId && req.user.role === 'admin' && !mongoose.isValidObjectId(userId)) return res.status(400).json({ message: 'Invalid user filter.' });
+
+  const eventSort = { occurredAt: 1, eventOrder: 1, _id: 1 };
+  // Keep all users' records in the aggregation until running balances are calculated.
+  // The final match below restricts member responses to their own records.
+  const pipeline = [
+    { $project: {
+      _id: 1, user: 1, kind: 1, category: { $ifNull: ['$category', 'normal'] }, amount: 1, remark: 1, occurredAt: 1, createdAt: 1,
+      eventType: { $literal: 'entry' }, eventOrder: { $literal: 0 }, bucketKind: '$kind',
+      netAmount: { $cond: [{ $eq: ['$kind', 'income'] }, '$amount', { $multiply: ['$amount', -1] }] }
+    } },
+    { $unionWith: { coll: DebitNote.collection.name, pipeline: [
+        { $project: {
+        _id: 1, user: 1, category: { $ifNull: ['$category', 'normal'] }, amount: 1, remark: 1, occurredAt: 1, createdAt: 1,
+        kind: { $literal: 'note' }, direction: 1, eventType: { $literal: 'note' }, eventOrder: { $literal: 1 }, bucketKind: { $literal: 'note' },
+        netAmount: { $cond: [{ $eq: ['$direction', 'credit'] }, '$amount', { $multiply: ['$amount', -1] }] }
+      } }
+    ] } },
+  ];
+  // Restrict rows only after both personal and shared running balances are calculated.
+  pipeline.push(
+    { $setWindowFields: { partitionBy: { user: '$user', category: '$category' }, sortBy: eventSort, output: {
+      userBalance: { $sum: '$netAmount', window: { documents: ['unbounded', 'current'] } }
+    } } },
+    // One shared Main Balance across every account's Normal ledger only.
+    { $setWindowFields: { sortBy: eventSort, output: {
+      mainBalance: { $sum: { $cond: [{ $eq: ['$category', 'normal'] }, '$netAmount', 0] }, window: { documents: ['unbounded', 'current'] } }
+    } } },
+    { $setWindowFields: { partitionBy: { user: '$user', kind: '$bucketKind', category: '$category' }, sortBy: eventSort, output: {
+      bucketCumulative: { $sum: '$amount', window: { documents: ['unbounded', 'current'] } }
+    } } },
+    { $match: { eventType: 'entry' } }
+  );
+
+  const match = {};
+  // Admins see the full ledger unless they explicitly select a member. Members are always restricted to their own records.
+  if (req.user.role === 'admin') {
+    if (userId) match.user = new mongoose.Types.ObjectId(userId);
+  } else {
+    match.user = req.user._id;
+  }
+  if (from || to) match.occurredAt = {};
+  if (from) match.occurredAt.$gte = new Date(from);
+  if (to) { const end = new Date(to); end.setHours(23, 59, 59, 999); match.occurredAt.$lte = end; }
+  if (['income', 'expense'].includes(kind)) match.kind = kind;
+  if (['normal', 'rental'].includes(category)) match.category = category;
+  pipeline.push({ $match: match });
+  pipeline.push({ $lookup: { from: User.collection.name, localField: 'user', foreignField: '_id', as: 'userDoc' } });
+  pipeline.push({ $unwind: { path: '$userDoc', preserveNullAndEmptyArrays: true } });
+  pipeline.push({ $addFields: { username: { $ifNull: ['$userDoc.username', 'Unknown'] } } });
+  pipeline.push({ $project: { userDoc: 0, netAmount: 0, eventOrder: 0, eventType: 0, bucketKind: 0 } });
+  const sortMap = {
+    newest: { occurredAt: -1, _id: -1 }, oldest: { occurredAt: 1, _id: 1 },
+    'low-high': { amount: 1, occurredAt: -1 }, 'high-low': { amount: -1, occurredAt: -1 },
+    person: { username: 1, occurredAt: -1, _id: -1 }
+  };
+  pipeline.push({ $sort: sortMap[sort] || sortMap.newest });
+  const entries = await Entry.aggregate(pipeline).allowDiskUse(true);
+  const normalized = entries.map(e => {
+    const row = { ...e, id: e._id, availableBalance: Number(e.userBalance || 0), bucketCumulative: Number(e.bucketCumulative || 0) };
+    delete row.userBalance;
+    return row;
+  });
   res.json({ entries: normalized });
 });
 app.post('/api/entries', auth, async (req, res) => {
@@ -118,9 +172,9 @@ app.patch('/api/entries/:id', auth, async (req, res) => {
   res.json({ message: 'Entry updated.', entry: { ...entry.toObject(), id: entry._id, username: req.user.username } });
 });
 app.get('/api/debit-notes', auth, async (req, res) => {
-  const filter = req.user.role === 'admin' && req.query.userId ? { user: req.query.userId } : { user: req.user._id };
-  const notes = await DebitNote.find(filter).populate('user', 'username').populate('originalEntry', 'remark amount kind category occurredAt').sort({ occurredAt: -1 }).limit(5000).lean();
-  res.json({ notes: notes.map(n => ({ ...n, id: n._id, username: n.user?.username || 'Unknown', user: n.user?._id })) });
+  const filter = req.user.role === 'admin' ? (req.query.userId ? { user: req.query.userId } : {}) : { user: req.user._id };
+  const notes = await DebitNote.find(filter).populate('user', 'username').populate('originalEntry', 'remark amount kind category occurredAt').sort({ occurredAt: -1 }).lean();
+  res.json({ notes: notes.map(n => ({ ...n, id: n._id, category: n.category || 'normal', username: n.user?.username || 'Unknown', user: n.user?._id })) });
 });
 app.post('/api/debit-notes', auth, async (req, res) => {
   const { originalEntryId = null, category, direction, amount, remark } = req.body;
@@ -139,8 +193,8 @@ const totalsFor = async (userId = null) => {
   const entryMatch = userId ? { user: new mongoose.Types.ObjectId(userId) } : {};
   const noteMatch = userId ? { user: new mongoose.Types.ObjectId(userId) } : {};
   const [entryRows, noteRows] = await Promise.all([
-    Entry.aggregate([{ $match: entryMatch }, { $group: { _id: { user: '$user', category: '$category', kind: '$kind' }, total: { $sum: '$amount' }, count: { $sum: 1 } } }]),
-    DebitNote.aggregate([{ $match: noteMatch }, { $group: { _id: { user: '$user', category: '$category', direction: '$direction' }, total: { $sum: '$amount' }, count: { $sum: 1 } } }])
+    Entry.aggregate([{ $match: entryMatch }, { $group: { _id: { user: '$user', category: { $ifNull: ['$category', 'normal'] }, kind: '$kind' }, total: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+    DebitNote.aggregate([{ $match: noteMatch }, { $group: { _id: { user: '$user', category: { $ifNull: ['$category', 'normal'] }, direction: '$direction' }, total: { $sum: '$amount' }, count: { $sum: 1 } } }])
   ]);
   const map = new Map();
   const get = (uid, category) => { const key = `${uid}:${category}`; if (!map.has(key)) map.set(key, { userId: uid, category, income: 0, expense: 0, debit: 0, credit: 0, entryCount: 0, noteCount: 0 }); return map.get(key); };
@@ -149,9 +203,14 @@ const totalsFor = async (userId = null) => {
   return [...map.values()].map(x => ({ ...x, balance: x.income - x.expense - x.debit + x.credit }));
 };
 app.get('/api/summary', auth, async (req, res) => {
-  const userId = req.user.role === 'admin' && req.query.userId ? req.query.userId : req.user._id.toString();
-  const categories = await totalsFor(userId);
-  res.json({ categories, total: categories.reduce((a, c) => a + c.balance, 0) });
+  const requestedUserId = req.user.role === 'admin' && req.query.userId ? req.query.userId : req.user._id.toString();
+  if (!mongoose.isValidObjectId(requestedUserId)) return res.status(400).json({ message: 'Invalid user filter.' });
+  const allCategories = await totalsFor();
+  const categories = allCategories.filter(row => row.userId === String(requestedUserId));
+  const total = categories.reduce((a, c) => a + c.balance, 0);
+  // Shared balance is global across all accounts but includes Normal only.
+  const mainBalance = allCategories.filter(row => row.category === 'normal').reduce((a, c) => a + c.balance, 0);
+  res.json({ categories, total, mainBalance });
 });
 app.post('/api/admin/users', auth, adminOnly, async (req, res) => {
   const username = String(req.body.username || '').trim().replace(/\s+/g, ' ').toUpperCase();
@@ -203,6 +262,6 @@ app.get('/api/admin/overview', auth, adminOnly, async (_req, res) => {
 });
 app.use((err, _req, res, _next) => { console.error(err.message); res.status(500).json({ message: 'Server error. Check backend logs.' }); });
 
-mongoose.connect(process.env.MONGODB_URI, { dbName: process.env.MONGODB_DB || 'income_expense' }).then(() => {
+mongoose.connect(process.env.MONGODB_URI, { dbName: process.env.MONGODB_DB || 'test' }).then(() => {
   app.listen(PORT, () => console.log(`API running on port ${PORT}`));
 }).catch(err => { console.error('MongoDB connection failed:', err.message); process.exit(1); });

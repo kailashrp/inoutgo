@@ -17,6 +17,8 @@ const entrySchema = new mongoose.Schema({
   occurredAt: { type: Date, default: Date.now, required: true }
 }, { timestamps: true });
 entrySchema.index({ occurredAt: -1 });
+entrySchema.index({ user: 1, occurredAt: 1, _id: 1 });
+entrySchema.index({ user: 1, kind: 1, category: 1, occurredAt: 1 });
 
 const debitNoteSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -27,6 +29,8 @@ const debitNoteSchema = new mongoose.Schema({
   remark: { type: String, required: true, trim: true, maxlength: 500 },
   occurredAt: { type: Date, default: Date.now, required: true }
 }, { timestamps: true });
+debitNoteSchema.index({ user: 1, occurredAt: 1, _id: 1 });
+debitNoteSchema.index({ occurredAt: 1, _id: 1 });
 
 export const User = mongoose.model('User', userSchema);
 export const Entry = mongoose.model('Entry', entrySchema);

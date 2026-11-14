@@ -12,7 +12,7 @@ const run = async () => {
   if (!initialPassword || initialPassword.length < 12 || initialPassword === 'ChangeThisNow123!') {
     throw new Error('Set SEED_DEFAULT_PASSWORD to your own temporary password (at least 12 characters) in backend/.env before seeding.');
   }
-  await mongoose.connect(process.env.MONGODB_URI);
+  await mongoose.connect(process.env.MONGODB_URI, { dbName: process.env.MONGODB_DB || 'test' });
   const passwordHash = await bcrypt.hash(initialPassword, 12);
   for (const username of names) {
     const existing = await User.findOne({ username });
