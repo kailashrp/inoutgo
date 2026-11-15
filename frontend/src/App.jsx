@@ -30,13 +30,36 @@ function App() {
   const [reportEntries, setReportEntries] = useState([]); const [reportNotes, setReportNotes] = useState([]); const [reportLoading, setReportLoading] = useState(false);
 
   const notify = useCallback((message, type = 'success') => { setToast({ message, type }); window.setTimeout(() => setToast(null), 3000); }, []);
+  // Clear the complete authenticated UI state in one place. This also closes
+  // any report/modal left open when a user signs out or their session expires.
+  const logout = useCallback((show = true) => {
+    try { localStorage.removeItem('ledger_token'); localStorage.removeItem('ledger_user'); } catch {}
+    setToken('');
+    setUser(null);
+    setPage('overview');
+    setEntries([]);
+    setNotes([]);
+    setAdminUsers([]);
+    setSummary({ categories: [], total: 0, mainBalance: 0 });
+    setReportEntries([]);
+    setReportNotes([]);
+    setReportOpen(false);
+    setQuickDownloadPeriod('');
+    setQuickAutoDownload('');
+    setFormOpen(false);
+    setNoteOpen(false);
+    setUserModalOpen(false);
+    setPasswordOpen(false);
+    setBusy(false);
+    setAuthMode('login');
+    if (show) notify('Signed out.');
+  }, [notify]);
   const request = useCallback(async (path, options = {}) => {
     const response = await fetch(`${API}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) } });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) { if (response.status === 401 && token) { logout(false); } throw new Error(data.message || 'Request failed.'); }
+    if (!response.ok) { if (response.status === 401 && token) logout(false); throw new Error(data.message || 'Request failed.'); }
     return data;
-  }, [token]);
-  const logout = (show = true) => { localStorage.removeItem('ledger_token'); localStorage.removeItem('ledger_user'); setToken(''); setUser(null); setEntries([]); setSummary({ categories: [], total: 0, mainBalance: 0 }); if (show) notify('Signed out.'); };
+  }, [token, logout]);
 
   const loadData = useCallback(async () => {
     if (!token || !user) return;
@@ -237,50 +260,142 @@ function App() {
     const expense = rows.filter(e=>e.kind==='expense').reduce((a,e)=>a+Number(e.amount||0),0);
     const credits = periodNotes.filter(n=>n.direction==='credit').reduce((a,n)=>a+Number(n.amount||0),0);
     const debits = periodNotes.filter(n=>n.direction==='debit').reduce((a,n)=>a+Number(n.amount||0),0);
-    const txRows = rows.map(e => ({ Date: dateTime(e.occurredAt), Person: e.username || user.username, Type: e.kind, Category: e.category, Amount: Number(e.amount || 0), AvailableBalance: Number(e.availableBalance || 0), Remark: e.remark || '' }));
-    const noteRows = periodNotes.map(n=>({Date:dateTime(n.occurredAt),Person:n.username||user.username,Type:n.direction,Category:n.category,Amount:Number(n.amount||0),Remark:n.remark||''}));
+    const txRows = rows.map(e => ({ Date: dateTime(e.occurredAt), Person: e.username || user?.username || 'Unknown', Type: e.kind, Category: e.category, Amount: Number(e.amount || 0), AvailableBalance: Number(e.availableBalance || 0), Remark: e.remark || '' }));
+    const noteRows = periodNotes.map(n=>({Date:dateTime(n.occurredAt),Person:n.username||user?.username||'Unknown',Type:n.direction,Category:n.category,Amount:Number(n.amount||0),Remark:n.remark||''}));
     const closing = opening + income - expense + credits - debits;
-    return { rows, txRows, noteRows, opening, income, expense, credits, debits, closing, periodNet: closing-opening, transactionCount: rows.length, adjustmentCount: periodNotes.length };
+    return { rows, periodNotes, txRows, noteRows, opening, income, expense, credits, debits, closing, periodNet: closing-opening, transactionCount: rows.length, adjustmentCount: periodNotes.length };
   }, [reportEntries, reportNotes, reportRange, reportConfig.category, reportConfig.userId, user]);
   const reportFilename = ext => `ledger-report-${reportRange.from || 'all'}-to-${reportRange.to || 'all'}.${ext}`;
-  const reportUserLabel = reportConfig.userId ? (adminUsers.find(u => u.id === reportConfig.userId)?.username || reportConfig.userId) : (user.role === 'admin' ? 'All users' : user.username);
+  const reportUserLabel = reportConfig.userId ? (adminUsers.find(u => u.id === reportConfig.userId)?.username || reportConfig.userId) : (user?.role === 'admin' ? 'All users' : (user?.username || 'Signed out'));
   const reportSummaryRow = () => ({
-    PeriodFrom: reportRange.from || 'All time', PeriodTo: reportRange.to || 'Today',
-    Category: reportConfig.category, User: reportUserLabel,
+    Period: reportRange.from && reportRange.to ? `${reportRange.from} to ${reportRange.to}` : 'All time',
+    Category: reportConfig.category === 'all' ? 'All categories' : reportConfig.category,
+    User: reportUserLabel,
     OpeningBalance: reportData.opening, Income: reportData.income, Expenses: reportData.expense,
     AdjustmentCredits: reportData.credits, AdjustmentDebits: reportData.debits,
     ClosingBalance: reportData.closing, PeriodNet: reportData.periodNet,
     TransactionCount: reportData.transactionCount, AdjustmentCount: reportData.adjustmentCount
   });
   const finishDownload = message => { notify(message); setReportOpen(false); setQuickAutoDownload(''); };
+  const excelDate = value => value ? new Date(value) : '';
+  const styleHeader = (ws, row = 1, lastCol = 1) => {
+    for (let c = 0; c < lastCol; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: row - 1, c })];
+      if (cell) cell.s = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '243B63' } }, alignment: { vertical: 'center', wrapText: true } };
+    }
+  };
+  const prepareSheet = (ws, widths, filterEndRow = ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']).e.r + 1 : 1) => {
+    ws['!cols'] = widths.map(wch => ({ wch }));
+    ws['!rows'] = [{ hpt: 28 }];
+    if (filterEndRow > 1 && ws['!ref']) ws['!autofilter'] = { ref: `A1:${XLSX.utils.encode_col(widths.length - 1)}${filterEndRow}` };
+    // SheetJS Community Edition keeps column sizing and filters; style metadata
+    // is also attached for compatible spreadsheet readers.
+    ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' };
+  };
   const downloadExcel = () => {
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([reportSummaryRow()]), 'Summary');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reportData.txRows), 'Transactions');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reportData.noteRows), 'Adjustments');
+    wb.Props = { Title: 'InOutGo Financial Report', Subject: 'Filtered income and expense transactions', Author: 'InOutGo', CreatedDate: new Date() };
+
+    const summary = [
+      ['INOUTGO · FINANCIAL REPORT'],
+      ['Report period', reportRange.from && reportRange.to ? `${reportRange.from} to ${reportRange.to}` : 'All time'],
+      ['Category', reportConfig.category === 'all' ? 'All categories' : reportConfig.category],
+      ['User', reportUserLabel],
+      [],
+      ['BALANCE SUMMARY', 'AMOUNT (INR)'],
+      ['Opening balance', reportData.opening],
+      ['Income', reportData.income],
+      ['Expenses', reportData.expense],
+      ['Adjustment credits', reportData.credits],
+      ['Adjustment debits', reportData.debits],
+      ['Closing balance', reportData.closing],
+      ['Period net', reportData.periodNet],
+      [],
+      ['RECORD COUNTS', 'COUNT'],
+      ['Transactions', reportData.transactionCount],
+      ['Adjustments', reportData.adjustmentCount]
+    ];
+    const summaryWs = XLSX.utils.aoa_to_sheet(summary);
+    summaryWs['!cols'] = [{ wch: 30 }, { wch: 28 }];
+    summaryWs['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }];
+    summaryWs['!rows'] = [{ hpt: 30 }];
+    [6, 15].forEach(r => styleHeader(summaryWs, r, 2));
+    [7,8,9,10,11,12,13].forEach(r => { const cell = summaryWs[`B${r}`]; if (cell) cell.z = '₹#,##0.00;[Red]-₹#,##0.00'; });
+    XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
+
+    const txRows = [
+      ['Date & time', 'Person', 'Type', 'Category', 'Amount (₹)', 'Available balance (₹)', 'Remark'],
+      ...reportData.rows.map(e => [excelDate(e.occurredAt), e.username || user?.username || 'Unknown', e.kind, e.category, Number(e.amount || 0), Number(e.availableBalance || 0), e.remark || ''])
+    ];
+    const txWs = XLSX.utils.aoa_to_sheet(txRows);
+    prepareSheet(txWs, [23, 20, 13, 14, 17, 24, 48]);
+    styleHeader(txWs, 1, 7);
+    for (let r = 2; r <= txRows.length; r++) {
+      if (txWs[`A${r}`]) txWs[`A${r}`].z = 'dd-mmm-yyyy hh:mm AM/PM';
+      for (const col of ['E','F']) if (txWs[`${col}${r}`]) txWs[`${col}${r}`].z = '₹#,##0.00;[Red]-₹#,##0.00';
+    }
+    XLSX.utils.book_append_sheet(wb, txWs, 'Transactions');
+
+    const adjustmentRows = [
+      ['Date & time', 'Person', 'Adjustment', 'Category', 'Amount (₹)', 'Remark'],
+      ...reportData.periodNotes.map(n => [excelDate(n.occurredAt), n.username || user?.username || 'Unknown', n.direction, n.category, Number(n.amount || 0), n.remark || ''])
+    ];
+    const adjWs = XLSX.utils.aoa_to_sheet(adjustmentRows);
+    prepareSheet(adjWs, [23, 20, 16, 14, 17, 52]);
+    styleHeader(adjWs, 1, 6);
+    for (let r = 2; r <= adjustmentRows.length; r++) {
+      if (adjWs[`A${r}`]) adjWs[`A${r}`].z = 'dd-mmm-yyyy hh:mm AM/PM';
+      if (adjWs[`E${r}`]) adjWs[`E${r}`].z = '₹#,##0.00;[Red]-₹#,##0.00';
+    }
+    XLSX.utils.book_append_sheet(wb, adjWs, 'Adjustments');
     XLSX.writeFile(wb, reportFilename('xlsx'));
-    finishDownload('Excel report downloaded.');
+    finishDownload('Formatted Excel report downloaded.');
   };
   const downloadCSV = () => {
     const quote = value => { const raw = String(value ?? ''); const safe = typeof value === 'string' && /^[\s]*[=+@-]/.test(raw) ? `'${raw}` : raw; return `"${safe.replace(/"/g, '""')}"`; };
-    const summaryRows = [['REPORT SUMMARY'], ...Object.entries(reportSummaryRow())];
-    const transactionRows = [['TRANSACTIONS'], ['Date','Person','Type','Category','Amount','Available Balance','Remark'], ...reportData.txRows.map(r=>[r.Date,r.Person,r.Type,r.Category,r.Amount,r.AvailableBalance,r.Remark])];
-    const adjustmentRows = [['ADJUSTMENTS'], ['Date','Person','Type','Category','Amount','Remark'], ...reportData.noteRows.map(r=>[r.Date,r.Person,r.Type,r.Category,r.Amount,r.Remark])];
+    const summaryRows = [['INOUTGO · FINANCIAL REPORT'], ['Report period', reportRange.from && reportRange.to ? `${reportRange.from} to ${reportRange.to}` : 'All time'], ['Category', reportConfig.category === 'all' ? 'All categories' : reportConfig.category], ['User', reportUserLabel], [], ['BALANCE SUMMARY', 'AMOUNT (INR)'], ['Opening balance', reportData.opening], ['Income', reportData.income], ['Expenses', reportData.expense], ['Adjustment credits', reportData.credits], ['Adjustment debits', reportData.debits], ['Closing balance', reportData.closing], ['Period net', reportData.periodNet], [], ['RECORD COUNTS', 'COUNT'], ['Transactions', reportData.transactionCount], ['Adjustments', reportData.adjustmentCount]];
+    const transactionRows = [['TRANSACTIONS'], ['Date & time','Person','Type','Category','Amount (INR)','Available balance (INR)','Remark'], ...reportData.txRows.map(r=>[r.Date,r.Person,r.Type,r.Category,r.Amount,r.AvailableBalance,r.Remark])];
+    const adjustmentRows = [['ADJUSTMENTS'], ['Date & time','Person','Adjustment','Category','Amount (INR)','Remark'], ...reportData.noteRows.map(r=>[r.Date,r.Person,r.Type,r.Category,r.Amount,r.Remark])];
     const csv = [...summaryRows, [], ...transactionRows, [], ...adjustmentRows].map(row=>row.map(quote).join(',')).join('\r\n');
     const blob = new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob); const link = document.createElement('a');
-    link.href = url; link.download = reportFilename('csv'); document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
-    finishDownload('CSV report downloaded.');
+    link.href = url; link.download = reportFilename('csv'); document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    finishDownload('Formatted CSV report downloaded.');
   };
   const downloadPDF = () => {
-    const doc = new jsPDF({ orientation: 'landscape' });
-    doc.setFontSize(18); doc.text('Income & Expense Report', 14, 16);
-    doc.setFontSize(9); doc.text(`Period: ${reportRange.from || 'All time'} to ${reportRange.to || 'Today'} | Category: ${reportConfig.category} | User: ${reportUserLabel}`, 14, 23);
-    autoTable(doc, { startY: 29, head: [['Date & time','Person','Type','Category','Amount (INR)','Remark']], body: reportData.txRows.map(r => [r.Date,r.Person,r.Type,r.Category,Number(r.Amount).toLocaleString('en-IN'),r.Remark]), styles: { fontSize: 8, cellPadding: 2 }, headStyles: { fillColor: [37, 99, 235] } });
-    if (reportData.noteRows.length) autoTable(doc,{startY:(doc.lastAutoTable?.finalY||30)+7,head:[['Date','Person','Adjustment','Category','Amount','Remark']],body:reportData.noteRows.map(n=>[n.Date,n.Person,n.Type,n.Category,money(n.Amount),n.Remark]),styles:{fontSize:8,cellPadding:2},headStyles:{fillColor:[70,80,100]}});
-    autoTable(doc,{startY:(doc.lastAutoTable?.finalY||30)+9,head:[['REPORT SUMMARY','AMOUNT']],body:[['Opening balance',money(reportData.opening)],['Income',money(reportData.income)],['Expenses',money(reportData.expense)],['Adjustment credits',money(reportData.credits)],['Adjustment debits',money(reportData.debits)],['Closing balance',money(reportData.closing)],['Period net',money(reportData.periodNet)],['Transactions / adjustments',`${reportData.transactionCount} / ${reportData.adjustmentCount}`]],styles:{fontSize:9,cellPadding:3},headStyles:{fillColor:[37,99,235]},columnStyles:{0:{cellWidth:65},1:{cellWidth:45}}});
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    doc.setProperties({ title: 'InOutGo Financial Report', subject: 'Filtered income and expense report', author: 'InOutGo' });
+    const periodLabel = reportRange.from && reportRange.to ? `${reportRange.from} to ${reportRange.to}` : 'All time';
+    const pdfMoney = value => `INR ${Number(value || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+    const drawPage = data => {
+      doc.setFontSize(8); doc.setTextColor(115); doc.text('INOUTGO · PRIVATE LEDGER', 14, 8);
+      doc.text(`Page ${data.pageNumber}`, 283, 8, { align: 'right' });
+    };
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.setTextColor(28, 43, 69); doc.text('Income & Expense Report', 14, 17);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(90);
+    doc.text(`Period: ${periodLabel}   |   Category: ${reportConfig.category === 'all' ? 'All categories' : reportConfig.category}   |   User: ${reportUserLabel}`, 14, 24);
+    autoTable(doc, {
+      startY: 29, head: [['Date & time','Person','Type','Category','Amount (₹)','Remark']],
+      body: reportData.txRows.length ? reportData.txRows.map(r => [r.Date,r.Person,r.Type,r.Category,pdfMoney(r.Amount),r.Remark]) : [['—','—','No transactions','—','—','No records for selected filters']],
+      margin: { left: 14, right: 14, bottom: 14 }, styles: { fontSize: 7.5, cellPadding: 2.2, overflow: 'linebreak' },
+      headStyles: { fillColor: [37, 59, 99], textColor: 255 }, alternateRowStyles: { fillColor: [244, 247, 252] },
+      columnStyles: { 0: { cellWidth: 34 }, 1: { cellWidth: 30 }, 2: { cellWidth: 20 }, 3: { cellWidth: 20 }, 4: { cellWidth: 29, halign: 'right' }, 5: { cellWidth: 'auto' } },
+      didDrawPage: drawPage
+    });
+    if (reportData.noteRows.length) autoTable(doc, {
+      startY: (doc.lastAutoTable?.finalY || 30) + 7, head: [['Date & time','Person','Adjustment','Category','Amount (₹)','Remark']],
+      body: reportData.noteRows.map(n => [n.Date,n.Person,n.Type,n.Category,pdfMoney(n.Amount),n.Remark]),
+      margin: { left: 14, right: 14, bottom: 14 }, styles: { fontSize: 7.5, cellPadding: 2.2 },
+      headStyles: { fillColor: [70, 80, 100], textColor: 255 }, alternateRowStyles: { fillColor: [247, 248, 250] }, didDrawPage: drawPage
+    });
+    autoTable(doc, {
+      startY: (doc.lastAutoTable?.finalY || 30) + 8, head: [['FILTERED PERIOD SUMMARY','AMOUNT']],
+      body: [['Opening balance',pdfMoney(reportData.opening)],['Income',pdfMoney(reportData.income)],['Expenses',pdfMoney(reportData.expense)],['Adjustment credits',pdfMoney(reportData.credits)],['Adjustment debits',pdfMoney(reportData.debits)],['Closing balance',pdfMoney(reportData.closing)],['Period net',pdfMoney(reportData.periodNet)],['Transactions / adjustments',`${reportData.transactionCount} / ${reportData.adjustmentCount}`]],
+      margin: { left: 14, right: 14, bottom: 14 }, styles: { fontSize: 8.5, cellPadding: 2.8 },
+      headStyles: { fillColor: [37, 59, 99], textColor: 255 }, columnStyles: { 0: { cellWidth: 75 }, 1: { cellWidth: 48, halign: 'right' } }, didDrawPage: drawPage
+    });
     doc.save(reportFilename('pdf'));
-    finishDownload('PDF report downloaded.');
+    finishDownload('Formatted PDF report downloaded.');
   };
   useEffect(() => {
     if (!reportOpen || !quickAutoDownload || reportLoading) return;
@@ -303,7 +418,7 @@ function App() {
       <button className={page==='entries'?'active':''} onClick={()=>setPage('entries')}><Activity size={18}/> Transactions</button>
       <button className={page==='settlements'?'active':''} onClick={()=>setPage('settlements')}><ReceiptText size={18}/> Debit notes</button>
       {user.role==='admin' && <><div className="workspace-label admin-label">ADMINISTRATION</div><button className={page==='admin'?'active':''} onClick={()=>setPage('admin')}><Users size={18}/> People & totals</button></>}
-    </nav><div className="sidebar-bottom"><div className="secure-pill"><ShieldCheck size={16}/><span><b>Private workspace</b><small>Secure sign-in enabled</small></span></div><button className="nav-quiet" onClick={()=>setPasswordOpen(true)}><LockKeyhole size={16}/> Change password</button><button className="nav-quiet" onClick={()=>logout()}><LogOut size={16}/> Sign out</button><div className="version">LEDGER WEB · 1.1.0</div></div></aside>
+    </nav><div className="sidebar-bottom"><div className="secure-pill"><ShieldCheck size={16}/><span><b>Private workspace</b><small>Secure sign-in enabled</small></span></div><button className="nav-quiet" onClick={()=>setPasswordOpen(true)}><LockKeyhole size={16}/> Change password</button><button className="nav-quiet" onClick={()=>logout()}><LogOut size={16}/> Sign out</button><div className="version">LEDGER WEB · 1.1.1</div></div></aside>
     <main className="main-content"><header className="topbar"><div><p className="eyebrow">YOUR FINANCES, AT A GLANCE</p><h1>{page==='overview'?'Overview':page==='entries'?'Transactions':page==='settlements'?'Debit notes':'People & totals'}</h1></div><div className="top-actions"><div className="today-chip"><CalendarDays size={15}/>{new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</div><div className="avatar">{user.username.slice(0,1)}</div><div className="user-chip"><b>{user.username}</b><small>{user.role==='admin'?'Administrator':'Member'}</small></div></div></header>
     {user.mustChangePassword && <div className="notice"><LockKeyhole size={17}/><span>For your security, change your temporary password before using the ledger.</span><button onClick={()=>setPasswordOpen(true)}>Change password</button></div>}
      <div className="toolbar"><div className="period-buttons">{[['month','This month'],['year','This year'],['fy','Financial year'],['pastyear','Past year'],['all','All time']].map(([period,label])=><button key={period} onClick={()=>setQuickDownloadPeriod(period)}>{label}</button>)}</div><div className="toolbar-actions"><button className="secondary" onClick={()=>{setQuickAutoDownload('');setReportConfig(c=>({...c,userId:'',category:'all',period:'month',from:'',to:'',format:'excel'}));setReportOpen(true);}}><Download size={16}/> Advanced download</button><button className="primary" onClick={openAdd}><Plus size={17}/> Add entry</button></div></div>
@@ -327,7 +442,7 @@ function App() {
       {user.role==='admin' && <label>3. User<select value={reportConfig.userId} onChange={e=>setReportConfig(c=>({...c,userId:e.target.value}))}><option value="">All users</option>{adminUsers.map(u=><option key={u.id} value={u.id}>{u.username}</option>)}</select></label>}
       <label>4. Category<select value={reportConfig.category} onChange={e=>setReportConfig(c=>({...c,category:e.target.value}))}><option value="all">All Categories</option><option value="normal">Normal</option><option value="rental">Rental</option></select></label>
       <label>5. Download format<select value={reportConfig.format} onChange={e=>setReportConfig(c=>({...c,format:e.target.value}))}><option value="excel">Excel (.xlsx)</option><option value="pdf">PDF (.pdf)</option><option value="csv">CSV (.csv)</option></select></label>
-      <div className="report-preview"><div className="report-preview-title"><b>Report preview</b><span>{reportLoading ? 'Loading report…' : `${reportData.rows.length} transactions · ${reportData.noteRows.length} adjustments`}</span></div><div className="report-metrics"><div><small>Opening balance</small><b>{money(reportData.opening)}</b></div><div><small>Income</small><b>{money(reportData.income)}</b></div><div><small>Expenses</small><b>{money(reportData.expense)}</b></div><div><small>Adjustments (net)</small><b>{money(reportData.credits-reportData.debits)}</b></div><div><small>Closing balance</small><b>{money(reportData.closing)}</b></div><div><small>Period net</small><b>{money(reportData.periodNet)}</b></div></div><p className="muted">Period: {reportRange.from||'All time'} → {reportRange.to||'Today'} · Opening balance is the selected account/category balance before the period; closing includes the selected period's transactions and adjustments.</p>{reportData.rows.slice(0,4).map((r,i)=><div className="preview-row" key={`${r._id||r.id||i}-${i}`}><span>{dateTime(r.occurredAt)} · {r.username||user.username}</span><b>{r.kind==='income'?'+':'−'}{money(r.amount)}</b></div>)}{reportData.rows.length>4&&<small className="muted">and {reportData.rows.length-4} more transactions…</small>}</div>
+      <div className="report-preview"><div className="report-preview-title"><b>Report preview</b><span>{reportLoading ? 'Loading report…' : `${reportData.rows.length} transactions · ${reportData.noteRows.length} adjustments`}</span></div><div className="report-metrics"><div><small>Opening balance</small><b>{money(reportData.opening)}</b></div><div><small>Income</small><b>{money(reportData.income)}</b></div><div><small>Expenses</small><b>{money(reportData.expense)}</b></div><div><small>Adjustments (net)</small><b>{money(reportData.credits-reportData.debits)}</b></div><div><small>Closing balance</small><b>{money(reportData.closing)}</b></div><div><small>Period net</small><b>{money(reportData.periodNet)}</b></div></div><p className="muted">Period: {reportRange.from||'All time'} → {reportRange.to||'All time'} · Opening balance is the selected account/category balance before the period; closing includes the selected period's transactions and adjustments.</p>{reportData.rows.slice(0,4).map((r,i)=><div className="preview-row" key={`${r._id||r.id||i}-${i}`}><span>{dateTime(r.occurredAt)} · {r.username||user?.username||'Unknown'}</span><b>{r.kind==='income'?'+':'−'}{money(r.amount)}</b></div>)}{reportData.rows.length>4&&<small className="muted">and {reportData.rows.length-4} more transactions…</small>}</div>
       <div className="modal-actions"><button type="button" className="secondary" onClick={()=>{setReportOpen(false);setQuickAutoDownload('');}}>Cancel</button><button type="button" className="secondary" disabled={reportLoading||(reportConfig.period==='custom'&&(!reportConfig.from||!reportConfig.to||reportConfig.to<reportConfig.from))} onClick={()=>reportConfig.format==='excel'?downloadExcel():reportConfig.format==='pdf'?downloadPDF():downloadCSV()}><Download size={15}/> Download {reportConfig.format.toUpperCase()}</button></div></section></div>}
     {userModalOpen && <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&setUserModalOpen(false)}><form className="modal-card" onSubmit={createUser}><div className="modal-head"><div><p className="eyebrow">FAMILY ACCOUNTS</p><h2>Add family member</h2><p className="muted">Create a login for a new family member. The temporary password must be changed at first sign-in.</p></div><button type="button" className="icon-button" onClick={()=>setUserModalOpen(false)}><X size={19}/></button></div><label>Full name<input autoComplete="off" value={newUserForm.username} onChange={e=>setNewUserForm(f=>({...f,username:e.target.value.toUpperCase()}))} minLength={2} maxLength={30} required placeholder="e.g. NEW MEMBER" /></label><label>Temporary password<input type="password" autoComplete="new-password" value={newUserForm.password} onChange={e=>setNewUserForm(f=>({...f,password:e.target.value}))} minLength={12} maxLength={128} required placeholder="At least 12 characters" /></label><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setUserModalOpen(false)}>Cancel</button><button className="primary">Create account <Check size={16}/></button></div></form></div>}
     {formOpen && <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&setFormOpen(false)}><form className="modal-card" onSubmit={saveEntry}><div className="modal-head"><div><p className="eyebrow">LEDGER ENTRY</p><h2>{editing?'Edit transaction':'Add transaction'}</h2><p className="muted">Saved with your account name and current date & time.</p></div><button type="button" className="icon-button" onClick={()=>setFormOpen(false)}><X size={19}/></button></div><div className="segmented"><button type="button" className={form.kind==='income'?'selected income-select':''} onClick={()=>setForm(f=>({...f,kind:'income'}))}><ArrowDownLeft size={16}/> Income</button><button type="button" className={form.kind==='expense'?'selected expense-select':''} onClick={()=>setForm(f=>({...f,kind:'expense'}))}><ArrowUpRight size={16}/> Expense</button></div><label>Category <span className="required">*</span><div className="category-options"><button type="button" className={form.category==='normal'?'category-option chosen':''} onClick={()=>setForm(f=>({...f,category:'normal'}))}><Wallet size={18}/><span><b>Normal</b><small>Default category</small></span>{form.category==='normal'&&<Check size={16}/>}</button><button type="button" className={form.category==='rental'?'category-option chosen rental-chosen':''} onClick={()=>setForm(f=>({...f,category:'rental'}))}><Home size={18}/><span><b>Rental</b><small>Separate balance</small></span>{form.category==='rental'&&<Check size={16}/>}</button></div></label><div className="preset-row"><label>Saved entries<select value="" onChange={e=>applyPreset(e.target.value)}><option value="">Choose a saved entry…</option>{savedPresets.map(p=><option key={p.name} value={p.name}>{p.name}</option>)}</select></label><div className="preset-save"><input aria-label="Preset name" placeholder="Preset name" value={presetName} onChange={e=>setPresetName(e.target.value)} maxLength={50}/><button type="button" className="secondary" onClick={savePreset}>Save preset</button></div></div><label>Amount (₹) <span className="required">*</span><div className="amount-input"><span>₹</span><input type="number" min="0.01" step="0.01" inputMode="decimal" placeholder="0.00" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} required/></div></label><label>Remark <span className="required">* Compulsory</span><textarea maxLength={500} rows={3} placeholder="Why is this entry being recorded?" value={form.remark} onChange={e=>setForm(f=>({...f,remark:e.target.value}))} required/><small className="field-hint">{form.remark.length}/500 characters</small></label><div className="auto-time"><Clock3 size={15}/><span>Current date & time will be recorded automatically.</span></div><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setFormOpen(false)}>Cancel</button><button className="primary" disabled={busy}>{editing?'Save changes':'Save entry'} <Check size={16}/></button></div></form></div>}
